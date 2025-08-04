@@ -126,4 +126,41 @@ const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);
 });
+// ✅ 註冊或更新使用者 GPS
+app.post("/registerUser", async (req, res) => {
+  const { userId, gps } = req.body;
+
+  if (!userId || !gps) {
+    return res.status(400).json({ error: "缺少 userId 或 gps" });
+  }
+
+  await User.updateOne(
+    { userId },
+    { $set: { gps } },
+    { upsert: true }
+  );
+
+  res.send("OK");
+});
+
+// ✅ 上傳物品資料
+app.post("/upload", async (req, res) => {
+  const { title, tags, percent, price, userId } = req.body;
+
+  if (!userId || !title) {
+    return res.status(400).json({ error: "缺少 userId 或 title" });
+  }
+
+  const item = new Item({
+    title,
+    tags: tags.split("#").filter((t) => t.trim() !== ""),
+    condition: percent,
+    price,
+    userId,
+    rating: 0, // 你可以改成其他預設評價
+  });
+
+  await item.save();
+  res.send("OK");
+});
 
