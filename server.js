@@ -9,10 +9,7 @@ app.use(cors());
 app.use(express.json());
 
 // ✅ 連接 MongoDB（預設本地端，Render 時會用環境變數）
-mongoose.connect(process.env.MONGODB_URI || "mongodb://localhost:27017/barterDB", {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-});
+mongoose.connect(process.env.MONGODB_URI);
 
 // ✅ Haversine 距離計算
 function haversineDistance(loc1, loc2) {
