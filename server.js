@@ -31,7 +31,7 @@ function evaluateDesire(user, targetItem, ownItem, userLocations, preference = "
   const targetLoc = userLocations[targetItem.userId];
   if (!targetLoc) return 0;
 
-  const distance = haversineDistance(user.location, targetLoc);
+  const distance = haversineDistance(user.gps, targetLoc);
   const distanceScore = Math.exp(-distance / 10);
 
   const damageScore = (targetItem.condition || 0) / 100;
