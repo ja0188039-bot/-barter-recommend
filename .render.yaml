@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: barter-api
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: MONGODB_URI
+        value: mongodb+srv://<你的連線字串>  # ⚠️可選：改用遠端資料庫
