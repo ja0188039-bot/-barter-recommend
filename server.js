@@ -27,49 +27,36 @@ function haversineDistance(loc1, loc2) {
 }
 
 // ✅ 評分函式
-function evaluateDesire(user, targetItem, ownItem, userLocations, preference = "") {
+function evaluateDesire(user, targetItem, ownItem, userLocations, weights) {
   const targetLoc = userLocations[targetItem.userId];
-  if (!targetLoc) return 0;
+  if (!targetLoc || !user.gps) return 0;
 
   const distance = haversineDistance(user.gps, targetLoc);
-  const distanceScore = Math.exp(-distance / 10);
+  const distanceScore = Math.exp(-distance / 10);     // 0~1
 
-  const damageScore = (targetItem.condition || 0) / 100;
-  const ratingScore = (targetItem.rating || 0) / 5;
+  const damageScore  = (targetItem.condition || 0) / 100;
+  const ratingScore  = (targetItem.rating || 0) / 5;
 
-  const matchedKeywords = new Set();
-  (user.searchHistory || []).forEach((kw) => {
-    const matchTag = (targetItem.tags || []).some((tag) => tag.includes(kw));
-    const matchTitle = (targetItem.title || "").includes(kw);
-    if (matchTag || matchTitle) matchedKeywords.add(kw);
-  });
-
-  const keywordBase = user.searchHistory?.length || 1;
-  const keywordScore = matchedKeywords.size / keywordBase;
+  // 關鍵字分數移除（你的需求是拿掉關鍵字）
+  const keywordScore = 0;
 
   const priceDiff = Math.abs(targetItem.price - ownItem.price);
-  const maxPrice = Math.max(targetItem.price, ownItem.price);
+  const maxPrice  = Math.max(targetItem.price, ownItem.price);
   const priceScore = maxPrice === 0 ? 0 : 1 - priceDiff / maxPrice;
 
-  const weights = { damage: 1, rating: 1, keyword: 1, price: 1, distance: 1 };
-  if (preference) weights[preference] = 2;
-
-  const totalWeight = Object.values(weights).reduce((a, b) => a + b);
-
+  // 依自訂權重加總
   const score =
-    weights.damage * damageScore +
-    weights.rating * ratingScore +
-    weights.keyword * keywordScore +
-    weights.price * priceScore +
+    weights.damage   * damageScore  +
+    weights.rating   * ratingScore  +
+    weights.price    * priceScore   +
     weights.distance * distanceScore;
 
-  return score / totalWeight;
+  return score; // 已經是 0~1 之間
 }
 
 // ✅ 雙向推薦主函式
-function recommendSwaps(currentUserId, users, items, userLocations, preference = "") {
+function recommendSwaps(currentUserId, users, items, userLocations, weights) {
   const result = [];
-
   const userA = users.find((u) => u.userId === currentUserId);
   if (!userA) return [];
 
@@ -77,43 +64,55 @@ function recommendSwaps(currentUserId, users, items, userLocations, preference =
 
   for (const userB of users) {
     if (userB.userId === currentUserId) continue;
-
     const itemsB = items.filter((i) => i.userId === userB.userId);
 
     for (const itemA of itemsA) {
       for (const itemB of itemsB) {
-        const scoreA = evaluateDesire(userA, itemB, itemA, userLocations, preference);
-        const scoreB = evaluateDesire(userB, itemA, itemB, userLocations, preference);
+        const scoreA = evaluateDesire(userA, itemB, itemA, userLocations, weights);
+        const scoreB = evaluateDesire(userB, itemA, itemB, userLocations, weights);
         const matchScore = (scoreA + scoreB) / 2;
 
         result.push({
           from: itemA,
           to: itemB,
-          scoreA: parseFloat(scoreA.toFixed(3)),
-          scoreB: parseFloat(scoreB.toFixed(3)),
-          matchScore: parseFloat(matchScore.toFixed(3)),
+          scoreA: +scoreA.toFixed(3),
+          scoreB: +scoreB.toFixed(3),
+          matchScore: +matchScore.toFixed(3),
         });
       }
     }
   }
-
   return result.sort((a, b) => b.matchScore - a.matchScore);
 }
+
 
 // ✅ API 路由
 app.get("/recommend", async (req, res) => {
   try {
-    const { userId, preference } = req.query;
+    const { userId } = req.query;
+
+    // 讀取權重（預設 25）
+    const raw = {
+      price:    Number(req.query.w_price)    || 25,
+      distance: Number(req.query.w_distance) || 25,
+      rating:   Number(req.query.w_rating)   || 25,
+      damage:   Number(req.query.w_damage)   || 25,
+    };
+    const sum = Object.values(raw).reduce((a,b)=>a+b,0) || 1;
+    const weights = {
+      price:    raw.price    / sum,
+      distance: raw.distance / sum,
+      rating:   raw.rating   / sum,
+      damage:   raw.damage   / sum,
+    };
 
     const users = await User.find();
     const items = await Item.find();
 
     const userLocations = {};
-    users.forEach((u) => {
-      userLocations[u.userId] = u.gps;
-    });
+    users.forEach(u => { userLocations[u.userId] = u.gps; });
 
-    const swaps = recommendSwaps(userId, users, items, userLocations, preference || "");
+    const swaps = recommendSwaps(userId, users, items, userLocations, weights);
     res.json(swaps);
   } catch (error) {
     console.error("雙向推薦失敗:", error);
