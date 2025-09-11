@@ -13,7 +13,13 @@ const ChatSchema = new mongoose.Schema({
     toItemId:   String
   },
   createdAt: { type: Date, default: Date.now },
-  messages:  { type: [MessageSchema], default: [] }
+  messages:  { type: [MessageSchema], default: [] },
+
+  // 👇 新增：雙方確認完成 → 關閉聊天室
+  doneConfirmations: { type: [String], default: [] }, // 已確認的 userId
+  closed:            { type: Boolean,  default: false },
+  closedAt:          { type: Date }
 }, { versionKey: false });
 
 module.exports = mongoose.model("Chat", ChatSchema);
+

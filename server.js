@@ -5,10 +5,14 @@ const User = require("./models/User");
 const Item = require("./models/Item");
 const Invite = require("./models/Invite");
 const Chat = require("./models/Chat");
+const morgan = require("morgan");        // ✅ 新增：請求日誌
+
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(morgan(':date[iso] :method :url :status :res[content-length] - :response-time ms'));  // ✅ 新增
+
 
 // ✅ 連接 MongoDB（Render 用環境變數）
 mongoose.connect(process.env.MONGODB_URI);
@@ -107,13 +111,21 @@ app.post("/upload", async (req, res) => {
 app.get("/recommend", async (req, res) => {
   try {
     const { userId } = req.query;
-    const raw = {
-      price:    Number(req.query.w_price)    ?? 25,
-      distance: Number(req.query.w_distance) ?? 25,
-      rating:   Number(req.query.w_rating)   ?? 25,
-      damage:   Number(req.query.w_damage)   ?? 25,
+
+    const numOr = (v, def) => {
+      if (v === undefined) return def;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : def;
     };
-    const sum = Object.values(raw).reduce((a,b)=>a+b,0) || 1;
+
+    const raw = {
+      price:    numOr(req.query.w_price,    25),
+      distance: numOr(req.query.w_distance, 25),
+      rating:   numOr(req.query.w_rating,   25),
+      damage:   numOr(req.query.w_damage,   25),
+    };
+
+    const sum = Object.values(raw).reduce((a, b) => a + b, 0) || 1;
     const weights = {
       price:    raw.price    / sum,
       distance: raw.distance / sum,
@@ -133,6 +145,7 @@ app.get("/recommend", async (req, res) => {
     res.status(500).json({ error: "伺服器錯誤" });
   }
 });
+
 
 // ---------- 新增：交易邀請 & 聊天室 ----------
 
@@ -200,32 +213,67 @@ app.get("/chats", async (req, res) => {
   const { userId } = req.query;
   if (!userId) return res.status(400).json({ error: "缺少 userId" });
 
-  const chats = await Chat.find({ members: userId }).sort({ "messages.createdAt": -1, createdAt: -1 });
+  const chats = await Chat.find({ members: userId })
+    .sort({ "messages.createdAt": -1, createdAt: -1 });
+
   res.json(chats.map(c => ({
     _id: c._id,
     members: c.members,
     pair: c.pair,
+    closed: c.closed,                                         // ✅ 新增欄位
     lastMessage: c.messages.length ? c.messages[c.messages.length - 1] : null
   })));
 });
+
 
 // 讀取聊天室訊息
 app.get("/chats/:chatId/messages", async (req, res) => {
   const chat = await Chat.findById(req.params.chatId);
   if (!chat) return res.status(404).json({ error: "找不到聊天室" });
-  res.json(chat.messages);
+  res.json({
+    closed: chat.closed,                                      // ✅ 新增欄位
+    doneConfirmations: chat.doneConfirmations || [],          // ✅ 新增欄位
+    messages: chat.messages
+  });
 });
+
 
 // 送訊息
 app.post("/chats/:chatId/messages", async (req, res) => {
   const { senderId, text } = req.body;
   if (!senderId || !text) return res.status(400).json({ error: "缺少 senderId 或 text" });
+
   const chat = await Chat.findById(req.params.chatId);
   if (!chat) return res.status(404).json({ error: "找不到聊天室" });
+  if (chat.closed) return res.status(403).json({ error: "聊天室已關閉" });   // ✅ 多這行
+
   chat.messages.push({ senderId, text, createdAt: new Date() });
   await chat.save();
   res.json({ ok: true });
 });
+
+app.post("/chats/:chatId/done", async (req, res) => {
+  const { userId } = req.body;
+  if (!userId) return res.status(400).json({ error: "缺少 userId" });
+
+  const chat = await Chat.findById(req.params.chatId);
+  if (!chat) return res.status(404).json({ error: "找不到聊天室" });
+  if (!chat.members.includes(userId)) return res.status(403).json({ error: "非聊天室成員" });
+
+  if (!chat.doneConfirmations.includes(userId)) {
+    chat.doneConfirmations.push(userId);
+  }
+
+  const bothConfirmed = chat.members.every(m => chat.doneConfirmations.includes(m));
+  if (bothConfirmed) {
+    chat.closed = true;
+    chat.closedAt = new Date();
+  }
+
+  await chat.save();
+  res.json({ ok: true, closed: chat.closed, doneConfirmations: chat.doneConfirmations });
+});
+
 
 // ✅ 啟動
 const PORT = process.env.PORT || 3001;
