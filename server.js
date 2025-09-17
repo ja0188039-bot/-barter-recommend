@@ -167,8 +167,9 @@ function recommendSwaps(currentUserId, users, items, userLocations, weights, opt
         if (opts.priceMode === "tolerance") {
           const tol = Math.max(0, Number(opts.priceTol) || 0);
           const diff = Math.abs((itemA.price || 0) - (itemB.price || 0));
-          if (diff > tol) continue;
+          if (diff > tol) continue; // 超出容忍 → 不顯示
         }
+
 
         const scoreA = evaluateDesire(userA, itemB, itemA, userLocations, weights, opts);
         const scoreB = evaluateDesire(userB, itemA, itemB, userLocations, weights, opts);
@@ -240,11 +241,13 @@ app.get("/recommend", async (req, res) => {
 
     // 模式與選項
     const modeQ = String(req.query.priceMode || "diff");
+    // 模式與選項（強制使用 tolerance）
     const opts = {
-      priceMode: (modeQ === "interval") ? "interval" : (modeQ === "tolerance" ? "tolerance" : "diff"),
+      priceMode: "tolerance",
       useCategory: req.query.useCategory === "1" || req.query.useCategory === "true",
       priceTol: numOr(req.query.priceTol, 0), // 容忍 ± 元
     };
+
 
     const users = await User.find();
     const items = await Item.find();
