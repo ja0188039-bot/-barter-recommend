@@ -33,28 +33,57 @@ function haversineDistance(loc1, loc2) {
 }
 
 // ✅ 評分
-function evaluateDesire(user, targetItem, ownItem, userLocations, weights) {
+// ✅ 評分（支援價格兩模式；沒距離時自動把距離權重視為 0 並正規化）
+function evaluateDesire(user, targetItem, ownItem, userLocations, weights, opts = {}) {
   const targetLoc = userLocations[targetItem.userId];
-  if (!targetLoc || !user.gps) return 0;
-  const distance = haversineDistance(user.gps, targetLoc);
-  const distanceScore = Math.exp(-distance / 10);
+  const hasDistance = !!(user?.gps && targetLoc);
+
+  const distance = hasDistance ? haversineDistance(user.gps, targetLoc) : null;
+  const distanceScore = hasDistance ? Math.exp(-distance / 10) : 0;
+
   const damageScore  = (targetItem.condition || 0) / 100;
   const ratingScore  = (targetItem.rating || 0) / 5;
 
-  const priceDiff = Math.abs((targetItem.price||0) - (ownItem.price||0));
-  const maxPrice  = Math.max((targetItem.price||0), (ownItem.price||0));
-  const priceScore = maxPrice === 0 ? 0 : 1 - priceDiff / maxPrice;
+  // 價格：兩種模式
+  let priceScore = 0;
+  if ((opts.priceMode || "diff") === "interval") {
+    const PRICE_BANDS = [0, 500, 2000, 5000, 10000, Infinity];
+    const idx = (p) => {
+      for (let i = 0; i < PRICE_BANDS.length - 1; i++) {
+        if (p >= PRICE_BANDS[i] && p < PRICE_BANDS[i + 1]) return i;
+      }
+      return 0;
+    };
+    const a = idx(ownItem.price || 0), b = idx(targetItem.price || 0);
+    const maxDelta = Math.max(1, PRICE_BANDS.length - 2);
+    priceScore = 1 - (Math.abs(a - b) / maxDelta);
+  } else {
+    const priceDiff = Math.abs((targetItem.price || 0) - (ownItem.price || 0));
+    const maxPrice  = Math.max((targetItem.price || 0), (ownItem.price || 0));
+    priceScore = maxPrice === 0 ? 0 : 1 - priceDiff / maxPrice;
+  }
+
+  // 沒距離資料：距離權重=0，並用有效權重總和正規化
+  const w = {
+    damage:   weights.damage,
+    rating:   weights.rating,
+    price:    weights.price,
+    distance: hasDistance ? weights.distance : 0,
+  };
+  const sum = w.damage + w.rating + w.price + w.distance || 1;
 
   return (
-    weights.damage   * damageScore  +
-    weights.rating   * ratingScore  +
-    weights.price    * priceScore   +
-    weights.distance * distanceScore
-  );
+    (w.damage   * damageScore) +
+    (w.rating   * ratingScore) +
+    (w.price    * priceScore)  +
+    (w.distance * distanceScore)
+  ) / sum;
 }
 
+
 // ✅ 雙向推薦
-function recommendSwaps(currentUserId, users, items, userLocations, weights) {
+// ✅ 雙向推薦（支援依分類配對 + 將 opts 透傳進評分）
+function recommendSwaps(currentUserId, users, items, userLocations, weights, opts = {}) {
   const result = [];
   const userA = users.find((u) => u.userId === currentUserId);
   if (!userA) return [];
@@ -67,13 +96,20 @@ function recommendSwaps(currentUserId, users, items, userLocations, weights) {
 
     for (const itemA of itemsA) {
       for (const itemB of itemsB) {
-        const scoreA = evaluateDesire(userA, itemB, itemA, userLocations, weights);
-        const scoreB = evaluateDesire(userB, itemA, itemB, userLocations, weights);
+        // 依分類配對（可選）
+        if (opts.useCategory) {
+          const catA = itemA.category ?? "other";
+          const catB = itemB.category ?? "other";
+          if (catA && catB && catA !== catB) continue;
+        }
+
+        const scoreA = evaluateDesire(userA, itemB, itemA, userLocations, weights, opts);
+        const scoreB = evaluateDesire(userB, itemA, itemB, userLocations, weights, opts);
         const matchScore = (scoreA + scoreB) / 2;
 
         result.push({
           from: itemA,
-          to: itemB,
+          to:   itemB,
           scoreA: +scoreA.toFixed(3),
           scoreB: +scoreB.toFixed(3),
           matchScore: +matchScore.toFixed(3),
@@ -83,6 +119,7 @@ function recommendSwaps(currentUserId, users, items, userLocations, weights) {
   }
   return result.sort((a, b) => b.matchScore - a.matchScore);
 }
+
 
 // ---------- 既有 API（保留你原本的） ----------
 app.post("/registerUser", async (req, res) => {
@@ -96,36 +133,35 @@ app.post("/upload", async (req, res) => {
   const { title, tags, percent, price, userId } = req.body;
   if (!userId || !title) return res.status(400).json({ error: "缺少 userId 或 title" });
 
+  const tagList = String(tags || "").split("#").map(t => t.trim()).filter(Boolean);
   const item = new Item({
     title,
-    tags: String(tags||"").split("#").filter((t) => t.trim() !== ""),
+    tags: tagList,
     condition: percent,
     price,
     userId,
     rating: 0,
+    category:  inferCategory(title, tagList),         // 👈 自動類別
+    priceBand: priceBandLabelByPrice(price || 0),     // 👈 價位區間
   });
+
   await item.save();
   res.send("OK");
 });
+
 
 app.get("/recommend", async (req, res) => {
   try {
     const { userId } = req.query;
 
-    const numOr = (v, def) => {
-      if (v === undefined) return def;
-      const n = Number(v);
-      return Number.isFinite(n) ? n : def;
-    };
-
+    // 權重（修正 NaN 問題）
     const raw = {
       price:    numOr(req.query.w_price,    25),
       distance: numOr(req.query.w_distance, 25),
       rating:   numOr(req.query.w_rating,   25),
       damage:   numOr(req.query.w_damage,   25),
     };
-
-    const sum = Object.values(raw).reduce((a, b) => a + b, 0) || 1;
+    const sum = Object.values(raw).reduce((a,b)=>a+b,0) || 1;
     const weights = {
       price:    raw.price    / sum,
       distance: raw.distance / sum,
@@ -133,18 +169,25 @@ app.get("/recommend", async (req, res) => {
       damage:   raw.damage   / sum,
     };
 
+    // 新增：價格模式 + 是否依分類配對
+    const opts = {
+      priceMode: (req.query.priceMode === "interval") ? "interval" : "diff",
+      useCategory: req.query.useCategory === "1" || req.query.useCategory === "true",
+    };
+
     const users = await User.find();
     const items = await Item.find();
     const userLocations = {};
     users.forEach(u => { userLocations[u.userId] = u.gps; });
 
-    const swaps = recommendSwaps(userId, users, items, userLocations, weights);
+    const swaps = recommendSwaps(userId, users, items, userLocations, weights, opts);
     res.json(swaps);
   } catch (e) {
     console.error("雙向推薦失敗:", e);
     res.status(500).json({ error: "伺服器錯誤" });
   }
 });
+
 
 
 // ---------- 新增：交易邀請 & 聊天室 ----------
@@ -273,6 +316,49 @@ app.post("/chats/:chatId/done", async (req, res) => {
   await chat.save();
   res.json({ ok: true, closed: chat.closed, doneConfirmations: chat.doneConfirmations });
 });
+
+// ===== 分類與價位區間 =====
+const PRICE_BANDS = [0, 500, 2000, 5000, 10000, Infinity]; // 你可自由調整門檻
+function priceBandIndex(price = 0) {
+  for (let i = 0; i < PRICE_BANDS.length - 1; i++) {
+    if (price >= PRICE_BANDS[i] && price < PRICE_BANDS[i + 1]) return i;
+  }
+  return 0;
+}
+function priceBandLabelByPrice(price = 0) {
+  const i = priceBandIndex(price);
+  const lo = PRICE_BANDS[i];
+  const hi = PRICE_BANDS[i + 1];
+  return hi === Infinity ? `${lo}+` : `${lo}-${hi - 1}`;
+}
+
+// 超簡易文字分類器（可依你品類再擴充）
+const CATEGORY_KEYWORDS = {
+  electronics: ["3c", "手機", "筆電", "電腦", "相機", "耳機", "充電", "螢幕", "主機"],
+  appliance:   ["家電", "電鍋", "冰箱", "冷氣", "洗衣", "微波", "吸塵"],
+  fashion:     ["衣", "褲", "鞋", "外套", "帽", "包"],
+  book:        ["書", "小說", "漫畫", "教材"],
+  sports:      ["運動", "健身", "球", "瑜伽", "單車", "登山"],
+  furniture:   ["桌", "椅", "櫃", "床", "沙發"],
+  toy:         ["玩具", "模型", "公仔", "積木"],
+  kitchen:     ["鍋", "碗", "杯", "餐具", "刀", "廚"],
+  beauty:      ["化妝", "保養", "香水"],
+};
+function inferCategory(title = "", tags = []) {
+  const text = (title + " " + (tags || []).join(" ")).toLowerCase();
+  for (const [cat, kws] of Object.entries(CATEGORY_KEYWORDS)) {
+    if (kws.some(k => text.includes(k))) return cat;
+  }
+  return "other";
+}
+
+// 解析數字參數（容錯：NaN 時用預設）
+const numOr = (v, def) => {
+  if (v === undefined) return def;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : def;
+};
+
 
 
 // ✅ 啟動
