@@ -1,30 +1,56 @@
+// --- Imports ---
 const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
+const morgan = require("morgan");
+
 const User = require("./models/User");
 const Item = require("./models/Item");
 const Invite = require("./models/Invite");
 const Chat = require("./models/Chat");
-const morgan = require("morgan");        // ✅ 新增：請求日誌
 
-
+// --- App & middleware ---
 const app = express();
 app.use(cors());
 app.use(express.json());
-app.use(morgan(':date[iso] :method :url :status :res[content-length] - :response-time ms'));  // ✅ 新增
+app.use(morgan(':date[iso] :method :url :status :res[content-length] - :response-time ms'));
 
-
-// ✅ 連接 MongoDB（Render 用環境變數）
+// --- DB connect ---
 mongoose.connect(process.env.MONGODB_URI);
 
-// ✅ 距離
+// --- Health & debug ---
+app.get("/healthz", (req, res) => res.send("ok"));
+app.get("/debug/counts", async (req, res) => {
+  const u = await User.countDocuments();
+  const i = await Item.countDocuments();
+  const inv = await Invite.countDocuments();
+  const c = await Chat.countDocuments();
+  const ids = await Item.distinct("userId");
+  res.json({ users: u, items: i, invites: inv, chats: c, distinctItemUsers: ids.length });
+});
+app.get("/debug/sample", async (req, res) => {
+  const users = await User.find().select("userId gps -_id").limit(5);
+  const items = await Item.find().select("userId title price condition category priceBand -_id").limit(10);
+  res.json({ users, items });
+});
+
+// ===== Helpers =====
+
+// 安全數值解析（避免 NaN）
+const numOr = (v, def) => {
+  if (v === undefined) return def;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : def;
+};
+
+// Haversine 距離（公里）
 function haversineDistance(loc1, loc2) {
   const degToRad = (deg) => (deg * Math.PI) / 180;
   const R = 6371;
-  const dLat = degToRad(loc2.lat - loc1.lat);
-  const dLng = degToRad(loc2.lng - loc1.lng);
-  const lat1 = degToRad(loc1.lat);
-  const lat2 = degToRad(loc2.lat);
+  const dLat = degToRad((loc2.lat || 0) - (loc1.lat || 0));
+  const dLng = degToRad((loc2.lng || 0) - (loc1.lng || 0));
+  const lat1 = degToRad(loc1.lat || 0);
+  const lat2 = degToRad(loc2.lat || 0);
   const a =
     Math.sin(dLat / 2) ** 2 +
     Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
@@ -32,8 +58,44 @@ function haversineDistance(loc1, loc2) {
   return R * c;
 }
 
-// ✅ 評分
-// ✅ 評分（支援價格兩模式；沒距離時自動把距離權重視為 0 並正規化）
+// 價位區間切點（可自行調整）
+const PRICE_BANDS = [0, 500, 2000, 5000, 10000, Infinity];
+function priceBandIndex(price = 0) {
+  for (let i = 0; i < PRICE_BANDS.length - 1; i++) {
+    if (price >= PRICE_BANDS[i] && price < PRICE_BANDS[i + 1]) return i;
+  }
+  return 0;
+}
+function priceBandLabelByPrice(price = 0) {
+  const i = priceBandIndex(price);
+  const lo = PRICE_BANDS[i];
+  const hi = PRICE_BANDS[i + 1];
+  return hi === Infinity ? `${lo}+` : `${lo}-${hi - 1}`;
+}
+
+// 超簡易文字分類器（依需求擴充）
+const CATEGORY_KEYWORDS = {
+  electronics: ["3c", "手機", "筆電", "電腦", "相機", "耳機", "充電", "螢幕", "主機"],
+  appliance:   ["家電", "電鍋", "冰箱", "冷氣", "洗衣", "微波", "吸塵"],
+  fashion:     ["衣", "褲", "鞋", "外套", "帽", "包"],
+  book:        ["書", "小說", "漫畫", "教材"],
+  sports:      ["運動", "健身", "球", "瑜伽", "單車", "登山"],
+  furniture:   ["桌", "椅", "櫃", "床", "沙發"],
+  toy:         ["玩具", "模型", "公仔", "積木"],
+  kitchen:     ["鍋", "碗", "杯", "餐具", "刀", "廚"],
+  beauty:      ["化妝", "保養", "香水"],
+};
+function inferCategory(title = "", tags = []) {
+  const text = (title + " " + (tags || []).join(" ")).toLowerCase();
+  for (const [cat, kws] of Object.entries(CATEGORY_KEYWORDS)) {
+    if (kws.some(k => text.includes(k))) return cat;
+  }
+  return "other";
+}
+
+// ===== Scoring =====
+
+// 評分（支援：diff / interval / tolerance；無距離→距離權重=0並重新正規化）
 function evaluateDesire(user, targetItem, ownItem, userLocations, weights, opts = {}) {
   const targetLoc = userLocations[targetItem.userId];
   const hasDistance = !!(user?.gps && targetLoc);
@@ -44,26 +106,27 @@ function evaluateDesire(user, targetItem, ownItem, userLocations, weights, opts 
   const damageScore  = (targetItem.condition || 0) / 100;
   const ratingScore  = (targetItem.rating || 0) / 5;
 
-  // 價格：兩種模式
+  // 價格分數（模式三選一）
   let priceScore = 0;
-  if ((opts.priceMode || "diff") === "interval") {
-    const PRICE_BANDS = [0, 500, 2000, 5000, 10000, Infinity];
-    const idx = (p) => {
-      for (let i = 0; i < PRICE_BANDS.length - 1; i++) {
-        if (p >= PRICE_BANDS[i] && p < PRICE_BANDS[i + 1]) return i;
-      }
-      return 0;
-    };
-    const a = idx(ownItem.price || 0), b = idx(targetItem.price || 0);
+  const mode = (opts.priceMode || "diff");
+
+  if (mode === "interval") {
+    const a = priceBandIndex(ownItem.price || 0);
+    const b = priceBandIndex(targetItem.price || 0);
     const maxDelta = Math.max(1, PRICE_BANDS.length - 2);
     priceScore = 1 - (Math.abs(a - b) / maxDelta);
+  } else if (mode === "tolerance") {
+    const tol = Math.max(0, Number(opts.priceTol) || 0);
+    const diff = Math.abs((targetItem.price || 0) - (ownItem.price || 0));
+    priceScore = tol > 0 ? Math.max(0, 1 - diff / tol) : (diff === 0 ? 1 : 0);
   } else {
+    // diff
     const priceDiff = Math.abs((targetItem.price || 0) - (ownItem.price || 0));
     const maxPrice  = Math.max((targetItem.price || 0), (ownItem.price || 0));
     priceScore = maxPrice === 0 ? 0 : 1 - priceDiff / maxPrice;
   }
 
-  // 沒距離資料：距離權重=0，並用有效權重總和正規化
+  // 沒距離：把距離權重設 0，並按有效權重重新正規化
   const w = {
     damage:   weights.damage,
     rating:   weights.rating,
@@ -80,9 +143,7 @@ function evaluateDesire(user, targetItem, ownItem, userLocations, weights, opts 
   ) / sum;
 }
 
-
-// ✅ 雙向推薦
-// ✅ 雙向推薦（支援依分類配對 + 將 opts 透傳進評分）
+// 雙向推薦（支援依分類配對、價格容忍過濾）
 function recommendSwaps(currentUserId, users, items, userLocations, weights, opts = {}) {
   const result = [];
   const userA = users.find((u) => u.userId === currentUserId);
@@ -98,9 +159,15 @@ function recommendSwaps(currentUserId, users, items, userLocations, weights, opt
       for (const itemB of itemsB) {
         // 依分類配對（可選）
         if (opts.useCategory) {
-          const catA = itemA.category ?? "other";
-          const catB = itemB.category ?? "other";
+          const catA = itemA.category ?? inferCategory(itemA.title, itemA.tags);
+          const catB = itemB.category ?? inferCategory(itemB.title, itemB.tags);
           if (catA && catB && catA !== catB) continue;
+        }
+        // 自訂價格容忍（可選）：超出 ±tol 直接略過
+        if (opts.priceMode === "tolerance") {
+          const tol = Math.max(0, Number(opts.priceTol) || 0);
+          const diff = Math.abs((itemA.price || 0) - (itemB.price || 0));
+          if (diff > tol) continue;
         }
 
         const scoreA = evaluateDesire(userA, itemB, itemA, userLocations, weights, opts);
@@ -120,8 +187,9 @@ function recommendSwaps(currentUserId, users, items, userLocations, weights, opt
   return result.sort((a, b) => b.matchScore - a.matchScore);
 }
 
+// ===== Routes =====
 
-// ---------- 既有 API（保留你原本的） ----------
+// 註冊/更新使用者（GPS）
 app.post("/registerUser", async (req, res) => {
   const { userId, gps } = req.body;
   if (!userId || !gps) return res.status(400).json({ error: "缺少 userId 或 gps" });
@@ -129,6 +197,7 @@ app.post("/registerUser", async (req, res) => {
   res.send("OK");
 });
 
+// 上傳物品（自動分類 + 價位區間）
 app.post("/upload", async (req, res) => {
   const { title, tags, percent, price, userId } = req.body;
   if (!userId || !title) return res.status(400).json({ error: "缺少 userId 或 title" });
@@ -141,20 +210,20 @@ app.post("/upload", async (req, res) => {
     price,
     userId,
     rating: 0,
-    category:  inferCategory(title, tagList),         // 👈 自動類別
-    priceBand: priceBandLabelByPrice(price || 0),     // 👈 價位區間
+    category:  inferCategory(title, tagList),
+    priceBand: priceBandLabelByPrice(price || 0),
   });
 
   await item.save();
   res.send("OK");
 });
 
-
+// 推薦（支援 diff / interval / tolerance + 依分類）
 app.get("/recommend", async (req, res) => {
   try {
     const { userId } = req.query;
 
-    // 權重（修正 NaN 問題）
+    // 權重（NaN 容錯）
     const raw = {
       price:    numOr(req.query.w_price,    25),
       distance: numOr(req.query.w_distance, 25),
@@ -169,10 +238,12 @@ app.get("/recommend", async (req, res) => {
       damage:   raw.damage   / sum,
     };
 
-    // 新增：價格模式 + 是否依分類配對
+    // 模式與選項
+    const modeQ = String(req.query.priceMode || "diff");
     const opts = {
-      priceMode: (req.query.priceMode === "interval") ? "interval" : "diff",
+      priceMode: (modeQ === "interval") ? "interval" : (modeQ === "tolerance" ? "tolerance" : "diff"),
       useCategory: req.query.useCategory === "1" || req.query.useCategory === "true",
+      priceTol: numOr(req.query.priceTol, 0), // 容忍 ± 元
     };
 
     const users = await User.find();
@@ -188,9 +259,7 @@ app.get("/recommend", async (req, res) => {
   }
 });
 
-
-
-// ---------- 新增：交易邀請 & 聊天室 ----------
+// ===== Invites & Chats =====
 
 // 送出邀請
 app.post("/invite", async (req, res) => {
@@ -198,7 +267,6 @@ app.post("/invite", async (req, res) => {
   if (!fromUserId || !toUserId || !fromItemId || !toItemId) {
     return res.status(400).json({ error: "參數不足" });
   }
-  // 避免同組合重複 pending
   const exists = await Invite.findOne({ fromUserId, toUserId, fromItemId, toItemId, status: "pending" });
   if (exists) return res.json({ ok: true, inviteId: exists._id });
 
@@ -231,16 +299,23 @@ app.post("/invites/:id/accept", async (req, res) => {
   const inv = await Invite.findById(req.params.id);
   if (!inv) return res.status(404).json({ error: "找不到邀請" });
   if (inv.status === "accepted") {
-    const chat = await Chat.findOne({ members: { $all: [inv.fromUserId, inv.toUserId] }, "pair.fromItemId": inv.fromItemId, "pair.toItemId": inv.toItemId });
+    const chat = await Chat.findOne({
+      members: { $all: [inv.fromUserId, inv.toUserId] },
+      "pair.fromItemId": inv.fromItemId,
+      "pair.toItemId": inv.toItemId
+    });
     return res.json({ ok: true, chatId: chat?._id });
   }
 
   inv.status = "accepted";
   await inv.save();
 
-  // 建立（或取得）聊天室
   const members = [inv.fromUserId, inv.toUserId].sort();
-  let chat = await Chat.findOne({ members: { $all: members }, "pair.fromItemId": inv.fromItemId, "pair.toItemId": inv.toItemId });
+  let chat = await Chat.findOne({
+    members: { $all: members },
+    "pair.fromItemId": inv.fromItemId,
+    "pair.toItemId": inv.toItemId
+  });
   if (!chat) {
     chat = await Chat.create({
       members,
@@ -263,38 +338,37 @@ app.get("/chats", async (req, res) => {
     _id: c._id,
     members: c.members,
     pair: c.pair,
-    closed: c.closed,                                         // ✅ 新增欄位
+    closed: c.closed,
     lastMessage: c.messages.length ? c.messages[c.messages.length - 1] : null
   })));
 });
 
-
-// 讀取聊天室訊息
+// 讀取聊天室訊息（含 meta）
 app.get("/chats/:chatId/messages", async (req, res) => {
   const chat = await Chat.findById(req.params.chatId);
   if (!chat) return res.status(404).json({ error: "找不到聊天室" });
   res.json({
-    closed: chat.closed,                                      // ✅ 新增欄位
-    doneConfirmations: chat.doneConfirmations || [],          // ✅ 新增欄位
+    closed: chat.closed,
+    doneConfirmations: chat.doneConfirmations || [],
     messages: chat.messages
   });
 });
 
-
-// 送訊息
+// 送訊息（已關閉禁止）
 app.post("/chats/:chatId/messages", async (req, res) => {
   const { senderId, text } = req.body;
   if (!senderId || !text) return res.status(400).json({ error: "缺少 senderId 或 text" });
 
   const chat = await Chat.findById(req.params.chatId);
   if (!chat) return res.status(404).json({ error: "找不到聊天室" });
-  if (chat.closed) return res.status(403).json({ error: "聊天室已關閉" });   // ✅ 多這行
+  if (chat.closed) return res.status(403).json({ error: "聊天室已關閉" });
 
   chat.messages.push({ senderId, text, createdAt: new Date() });
   await chat.save();
   res.json({ ok: true });
 });
 
+// 交易完成確認（雙方都按 → 關閉聊天室）
 app.post("/chats/:chatId/done", async (req, res) => {
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ error: "缺少 userId" });
@@ -317,51 +391,24 @@ app.post("/chats/:chatId/done", async (req, res) => {
   res.json({ ok: true, closed: chat.closed, doneConfirmations: chat.doneConfirmations });
 });
 
-// ===== 分類與價位區間 =====
-const PRICE_BANDS = [0, 500, 2000, 5000, 10000, Infinity]; // 你可自由調整門檻
-function priceBandIndex(price = 0) {
-  for (let i = 0; i < PRICE_BANDS.length - 1; i++) {
-    if (price >= PRICE_BANDS[i] && price < PRICE_BANDS[i + 1]) return i;
+// （可選）回填舊資料缺的 category / priceBand
+app.post("/debug/backfill-item-fields", async (req, res) => {
+  const items = await Item.find();
+  let updated = 0;
+  for (const it of items) {
+    const tags = it.tags || [];
+    const need = !it.category || !it.priceBand;
+    if (need) {
+      it.category  = it.category  || inferCategory(it.title, tags);
+      it.priceBand = it.priceBand || priceBandLabelByPrice(it.price || 0);
+      await it.save();
+      updated++;
+    }
   }
-  return 0;
-}
-function priceBandLabelByPrice(price = 0) {
-  const i = priceBandIndex(price);
-  const lo = PRICE_BANDS[i];
-  const hi = PRICE_BANDS[i + 1];
-  return hi === Infinity ? `${lo}+` : `${lo}-${hi - 1}`;
-}
+  res.json({ ok: true, updated });
+});
 
-// 超簡易文字分類器（可依你品類再擴充）
-const CATEGORY_KEYWORDS = {
-  electronics: ["3c", "手機", "筆電", "電腦", "相機", "耳機", "充電", "螢幕", "主機"],
-  appliance:   ["家電", "電鍋", "冰箱", "冷氣", "洗衣", "微波", "吸塵"],
-  fashion:     ["衣", "褲", "鞋", "外套", "帽", "包"],
-  book:        ["書", "小說", "漫畫", "教材"],
-  sports:      ["運動", "健身", "球", "瑜伽", "單車", "登山"],
-  furniture:   ["桌", "椅", "櫃", "床", "沙發"],
-  toy:         ["玩具", "模型", "公仔", "積木"],
-  kitchen:     ["鍋", "碗", "杯", "餐具", "刀", "廚"],
-  beauty:      ["化妝", "保養", "香水"],
-};
-function inferCategory(title = "", tags = []) {
-  const text = (title + " " + (tags || []).join(" ")).toLowerCase();
-  for (const [cat, kws] of Object.entries(CATEGORY_KEYWORDS)) {
-    if (kws.some(k => text.includes(k))) return cat;
-  }
-  return "other";
-}
-
-// 解析數字參數（容錯：NaN 時用預設）
-const numOr = (v, def) => {
-  if (v === undefined) return def;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : def;
-};
-
-
-
-// ✅ 啟動
+// --- Start ---
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);
