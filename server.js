@@ -164,11 +164,13 @@ function recommendSwaps(currentUserId, users, items, userLocations, weights, opt
           if (catA && catB && catA !== catB) continue;
         }
         // 自訂價格容忍（可選）：超出 ±tol 直接略過
+        // 自訂價格容忍（可選）：超出 ±tol 直接略過
         if (opts.priceMode === "tolerance") {
           const tol = Math.max(0, Number(opts.priceTol) || 0);
           const diff = Math.abs((itemA.price || 0) - (itemB.price || 0));
-          if (diff > tol) continue; // 超出容忍 → 不顯示
+          if (diff > tol) continue;   // 👈 超過容忍 → 不回傳
         }
+
 
 
         const scoreA = evaluateDesire(userA, itemB, itemA, userLocations, weights, opts);
@@ -224,7 +226,6 @@ app.get("/recommend", async (req, res) => {
   try {
     const { userId } = req.query;
 
-    // 權重（NaN 容錯）
     const raw = {
       price:    numOr(req.query.w_price,    25),
       distance: numOr(req.query.w_distance, 25),
@@ -239,15 +240,13 @@ app.get("/recommend", async (req, res) => {
       damage:   raw.damage   / sum,
     };
 
-    // 模式與選項
-    const modeQ = String(req.query.priceMode || "diff");
-    // 模式與選項（強制使用 tolerance）
+    // ✅ 只用容忍模式；沒帶就當 0（表示只允許同價）
+    const tol = numOr(req.query.priceTol, 0);
     const opts = {
       priceMode: "tolerance",
+      priceTol: Math.max(0, tol),
       useCategory: req.query.useCategory === "1" || req.query.useCategory === "true",
-      priceTol: numOr(req.query.priceTol, 0), // 容忍 ± 元
     };
-
 
     const users = await User.find();
     const items = await Item.find();
@@ -261,6 +260,7 @@ app.get("/recommend", async (req, res) => {
     res.status(500).json({ error: "伺服器錯誤" });
   }
 });
+
 
 // ===== Invites & Chats =====
 
