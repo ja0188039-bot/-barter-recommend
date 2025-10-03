@@ -2,25 +2,20 @@
   "name": "barter-recommend",
   "version": "1.0.0",
   "description": "以物易物推薦系統完整後端 API",
+  "private": true,
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "echo \"No test specified\" && exit 0"
+    "build": "echo \"no build step\""
   },
-  "author": "你的名字",
-  "license": "ISC",
-  "keywords": [
-    "recommendation",
-    "barter",
-    "express",
-    "nodejs",
-    "mongoose"
-  ],
+  "engines": {
+    "node": "20.x"
+  },
   "dependencies": {
     "cors": "^2.8.5",
-    "express": "^4.18.2",
-    "mongodb": "^6.16.0",
-    "mongoose": "^8.15.1"
+    "express": "^4.19.2",
+    "mongoose": "^8.6.0",
+    "morgan": "^1.10.0"
   }
 }
 
