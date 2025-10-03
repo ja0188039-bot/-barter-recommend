@@ -194,32 +194,55 @@ function recommendSwaps(currentUserId, users, items, userLocations, weights, opt
 
 // 註冊/更新使用者（GPS）
 app.post("/registerUser", async (req, res) => {
-  const { userId, gps } = req.body;
+  const { userId, gps, email, displayName } = req.body;
   if (!userId || !gps) return res.status(400).json({ error: "缺少 userId 或 gps" });
-  await User.updateOne({ userId }, { $set: { gps } }, { upsert: true });
+
+  const $set = { gps, updatedAt: new Date() };
+  if (email !== undefined) $set.email = email;
+  if (displayName !== undefined) $set.displayName = displayName;
+
+  await User.updateOne({ userId }, { $set }, { upsert: true });
   res.send("OK");
 });
+
 
 // 上傳物品（自動分類 + 價位區間）
 app.post("/upload", async (req, res) => {
-  const { title, tags, percent, price, userId } = req.body;
-  if (!userId || !title) return res.status(400).json({ error: "缺少 userId 或 title" });
+  try {
+    const { title, category, percent, price, userId, tags } = req.body;
+    if (!userId) return res.status(400).json({ error: "缺少 userId" });
+    if (!title)  return res.status(400).json({ error: "缺少 title" });
 
-  const tagList = String(tags || "").split("#").map(t => t.trim()).filter(Boolean);
-  const item = new Item({
-    title,
-    tags: tagList,
-    condition: percent,
-    price,
-    userId,
-    rating: 0,
-    category:  inferCategory(title, tagList),
-    priceBand: priceBandLabelByPrice(price || 0),
-  });
+    // ✅ 先確認該 userId 是否存在於 Users
+    const user = await User.findOne({ userId });
+    if (!user) {
+      return res.status(400).json({ error: "未知的 userId，請先登入/註冊（/registerUser）" });
+    }
 
-  await item.save();
-  res.send("OK");
+    // 建立 Item（欄位名稱對應前端）
+    const it = await Item.create({
+      title,
+      tags: Array.isArray(tags) ? tags : [],
+      condition: Number.isFinite(percent) ? Number(percent) : 0,
+      price: Number.isFinite(price) ? Number(price) : 0,
+      userId,                        // ✅ 與 Users.userId 一致
+      category: category || "other",
+      priceBand: (() => {
+        const p = Number(price) || 0;
+        if (p < 500) return "0-499";
+        if (p < 2000) return "500-1999";
+        if (p < 5000) return "2000-4999";
+        return "5000+";
+      })()
+    });
+
+    res.json({ ok: true, itemId: it._id });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Upload failed" });
+  }
 });
+
 
 // 推薦（支援 diff / interval / tolerance + 依分類）
 app.get("/recommend", async (req, res) => {
