@@ -242,6 +242,36 @@ app.post("/upload", async (req, res) => {
     res.status(500).json({ error: "Upload failed" });
   }
 });
+// 物品查詢：依關鍵字搜尋 title / tags
+app.get("/items/search", async (req, res) => {
+  try {
+    const { q = "", userId } = req.query;
+    const keyword = String(q || "").trim();
+
+    if (!keyword) {
+      return res.json([]); // 空字串就回空陣列
+    }
+
+    const regex = new RegExp(keyword, "i");
+    const cond = {
+      $or: [
+        { title: regex },
+        { tags: regex },
+      ],
+    };
+
+    // 如果有帶 userId，就不要把自己的物品也搜出來
+    if (userId) {
+      cond.userId = { $ne: userId };
+    }
+
+    const items = await Item.find(cond).limit(50);
+    res.json(items);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Search failed" });
+  }
+});
 
 
 // 推薦（支援 diff / interval / tolerance + 依分類）
