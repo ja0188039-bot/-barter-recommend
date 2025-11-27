@@ -228,7 +228,7 @@ app.post("/registerUser", async (req, res) => {
     return res.status(400).json({ error: "缺少 email 或 gps" });
 
   const $set = { gps, updatedAt: new Date() };
-  if (email !== undefined) $set.email = email;
+  $setset.email = email;
   if (displayName !== undefined) $set.displayName = displayName;
 
   await User.updateOne({ email }, { $set }, { upsert: true });
@@ -242,21 +242,18 @@ app.post("/upload", async (req, res) => {
     if (!email) return res.status(400).json({ error: "缺少 email" });
     if (!title) return res.status(400).json({ error: "缺少 title" });
 
-    // 確認 email 是否存在於 Users
+    // 先確認該 email 是否存在於 Users
     const user = await User.findOne({ email });
     if (!user) {
-      return res
-        .status(400)
-        .json({ error: "未知的 email，請先登入/註冊（/registerUser）" });
+      return res.status(400).json({ error: "未知的 email，請先登入/註冊（/registerUser）" });
     }
 
-    // 建立 Item（欄位名稱對應前端）
     const it = await Item.create({
       title,
       tags: Array.isArray(tags) ? tags : [],
       condition: Number.isFinite(percent) ? Number(percent) : 0,
       price: Number.isFinite(price) ? Number(price) : 0,
-      email, // 與 Users.email 一致
+      email,                       // ✅ 改成 email
       category: category || "other",
       priceBand: (() => {
         const p = Number(price) || 0;
