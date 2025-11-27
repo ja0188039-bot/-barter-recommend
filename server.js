@@ -519,10 +519,12 @@ app.post("/chats/:chatId/done", async (req, res) => {
 });
 
 // --- Start ---
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 10000;
+
 app.listen(PORT, () => {
-  console.log(`✅ Server running on http://localhost:${PORT}`);
+  console.log(`Server running on http://localhost:${PORT}`);
 });
+
 
 
 
