@@ -1,12 +1,29 @@
 const mongoose = require("mongoose");
 
-const InviteSchema = new mongoose.Schema({
-  fromUserId: { type: String, required: true },  // 發出方（Firebase uid）
-  toUserId:   { type: String, required: true },  // 接收方（Firebase uid）
-  fromItemId: { type: String, required: true },  // A 的物品 _id（字串）
-  toItemId:   { type: String, required: true },  // B 的物品 _id（字串）
-  status:     { type: String, enum: ["pending", "accepted", "rejected"], default: "pending", index: true },
-  createdAt:  { type: Date, default: Date.now }
+const MessageSchema = new mongoose.Schema({
+  senderEmail: { type: String, required: true },
+  text:        { type: String, required: true },
+  createdAt:   { type: Date,   default: Date.now },
+}, { _id: false });
+
+const ChatSchema = new mongoose.Schema({
+  // 兩個成員的 email
+  members: { type: [String], required: true, index: true }, // [userAEmail, userBEmail]
+
+  pair: {
+    fromItemId: String,
+    toItemId:   String,
+  },
+
+  createdAt: { type: Date, default: Date.now },
+  messages:  { type: [MessageSchema], default: [] },
+
+  // 雙方確認完成 → 關閉聊天室
+  doneConfirmations: { type: [String], default: [] }, // 已確認完成的成員 email
+  closed:            { type: Boolean,  default: false },
+  closedAt:          { type: Date },
 }, { versionKey: false });
 
-module.exports = mongoose.model("Invite", InviteSchema);
+module.exports = mongoose.model("Chat", ChatSchema);
+
+
