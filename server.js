@@ -222,7 +222,7 @@ app.post("/registerUser", async (req, res) => {
 // 上傳物品
 app.post("/upload", async (req, res) => {
   try {
-    const { title, category, percent, price, email, tags } = req.body;
+    const { title, category, percent, price, email, tags, imageUrl} = req.body;
     if (!email) return res.status(400).json({ error: "缺少 email" });
     if (!title) return res.status(400).json({ error: "缺少 title" });
 
