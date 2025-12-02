@@ -3,6 +3,8 @@ const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
 const morgan = require("morgan");
+const axios = require("axios");
+
 
 const User = require("./models/User");
 const Item = require("./models/Item");
@@ -26,6 +28,9 @@ mongoose
   .connect(MONGODB_URI)
   .then(() => console.log("✅ MongoDB connected"))
   .catch((err) => console.error("MongoDB connect error", err));
+// ⭐ Flask 伺服器位置
+const FLASK_BASE =
+  process.env.FLASK_BASE_URL || "https://fal-tripo3d.onrender.com";
 
 // Health check
 app.get("/healthz", (req, res) => res.send("ok"));
@@ -234,6 +239,7 @@ app.post("/upload", async (req, res) => {
       condition: Number.isFinite(percent) ? Number(percent) : 0,
       price: Number.isFinite(price) ? Number(price) : 0,
       email,
+      imageUrl: typeof imageUrl === "string" ? imageUrl : null,
       category: category || "other",
       priceBand: priceBandLabelByPrice(price),
     });
@@ -517,6 +523,59 @@ app.post("/chats/:chatId/done", async (req, res) => {
     res.status(500).json({ error: "done failed" });
   }
 });
+
+// ========= Tripo3D：轉呼叫 Flask /generate =========
+app.post("/tripo3d/fromUrl", async (req, res) => {
+  try {
+    const { imageUrl } = req.body;
+
+    // 基本檢查：理論上有圖片才會到這裡，
+    // 但保留這個防呆沒壞處
+    if (!imageUrl || typeof imageUrl !== "string") {
+      return res.status(400).json({
+        ok: false,
+        error: "缺少 imageUrl",
+      });
+    }
+
+    // 呼叫你在 Render 上的 Flask /generate
+    const resp = await axios.post(
+      `${FLASK_BASE}/generate`,
+      { image_url: imageUrl },       // ⭐ Flask 端參數名稱是 image_url
+      { timeout: 1000 * 60 * 5 }    // 最多等 5 分鐘（Tripo3D 有時候會慢）
+    );
+
+    const data = resp.data;
+
+    // 期待 Flask 回傳：
+    // { "success": true, "modelUrl": "https://...glb", ... }
+    if (!data || data.success !== true || !data.modelUrl) {
+      return res.status(500).json({
+        ok: false,
+        error:
+          (data && data.error) ||
+          "Flask 回傳格式錯誤或缺少 modelUrl",
+      });
+    }
+
+    // 對齊 Flutter ArPreviewPage 期待的格式
+    return res.json({
+      ok: true,
+      glbUrl: data.modelUrl,
+    });
+  } catch (err) {
+    console.error(
+      "tripo3d/fromUrl error",
+      err?.response?.data || err
+    );
+    return res.status(500).json({
+      ok: false,
+      error: "Node 端呼叫 Flask 失敗",
+      detail: err?.response?.data || String(err),
+    });
+  }
+});
+
 
 // --- Start ---
 const PORT = process.env.PORT || 10000;
